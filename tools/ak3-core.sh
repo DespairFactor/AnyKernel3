@@ -1,7 +1,7 @@
 ### AnyKernel methods (DO NOT CHANGE)
 ## osm0sis @ xda-developers
 
-OUTFD=$1;
+[ "$OUTFD" ] || OUTFD=$1;
 
 # set up working directory variables
 [ "$home" ] || home=$PWD;
@@ -326,9 +326,10 @@ flash_boot() {
             echo "Attempting kernel unpack with busybox $comp..." >&2;
             $comp -dc $kernel > kernel;
           fi;
-          $bin/magiskboot hexpatch kernel 736B69705F696E697472616D667300 77616E745F696E697472616D667300;
+          # legacy SAR kernel string skip_initramfs -> want_initramfs
+          $bin/magiskboot hexpatch kernel 736B69705F696E697472616D6673 77616E745F696E697472616D6673;
           if [ "$(file_getprop $home/anykernel.sh do.systemless)" == 1 ]; then
-            strings kernel | grep -E -m1 'Linux version.*#' > $home/vertmp;
+            strings kernel 2>/dev/null | grep -E -m1 'Linux version.*#' > $home/vertmp;
           fi;
           if [ "$comp" ]; then
             $bin/magiskboot compress=$comp kernel kernel.$comp;
@@ -340,16 +341,15 @@ flash_boot() {
           fi;
           [ ! -f .magisk ] && $bin/magiskboot cpio ramdisk.cpio "extract .backup/.magisk .magisk";
           export $(cat .magisk);
-          [ $((magisk_patched & 8)) -ne 0 ] && export TWOSTAGEINIT=true;
           for fdt in dtb extra kernel_dtb recovery_dtbo; do
-            [ -f $fdt ] && $bin/magiskboot dtb $fdt patch;
+            [ -f $fdt ] && $bin/magiskboot dtb $fdt patch; # remove dtb verity/avb
           done;
         else
           case $kernel in
             *-dtb) rm -f kernel_dtb;;
           esac;
         fi;
-        unset magisk_patched KEEPFORCEENCRYPT KEEPVERITY SHA1 TWOSTAGEINIT; # leave PATCHVBMETAFLAG set for repack
+        unset magisk_patched KEEPVERITY KEEPFORCEENCRYPT RECOVERYMODE PREINITDEVICE SHA1 RANDOMSEED; # leave PATCHVBMETAFLAG set for repack
       ;;
     esac;
     case $ramdisk_compression in
@@ -415,7 +415,7 @@ flash_boot() {
 
 # flash_generic <name>
 flash_generic() {
-  local avb avbblock avbpath file flags img imgblock isro isunmounted path;
+  local avb avbblock avbpath file flags img imgblock imgsz isro isunmounted path;
 
   cd $home;
   for file in $1 $1.img; do
@@ -426,7 +426,7 @@ flash_generic() {
   done;
 
   if [ "$img" -a ! -f ${1}_flashed ]; then
-    for path in /dev/block/bootdevice/by-name /dev/block/mapper; do
+    for path in /dev/block/mapper /dev/block/by-name /dev/block/bootdevice/by-name; do
       for file in $1 $1$slot; do
         if [ -e $path/$file ]; then
           imgblock=$path/$file;
@@ -437,6 +437,9 @@ flash_generic() {
     if [ ! "$imgblock" ]; then
       abort "$1 partition could not be found. Aborting...";
     fi;
+    if [ ! "$no_block_display" ]; then
+      ui_print " " "$imgblock";
+    fi;
     if [ "$path" == "/dev/block/mapper" ]; then
       avb=$($bin/httools_static avb $1);
       [ $? == 0 ] || abort "Failed to parse fstab entry for $1. Aborting...";
@@ -445,7 +448,7 @@ flash_generic() {
         [ $? == 0 ] || abort "Failed to parse top-level vbmeta. Aborting...";
         if [ "$flags" == "enabled" ]; then
           ui_print " " "dm-verity detected! Patching $avb...";
-          for avbpath in /dev/block/bootdevice/by-name /dev/block/mapper; do
+          for avbpath in /dev/block/mapper /dev/block/by-name /dev/block/bootdevice/by-name; do
             for file in $avb $avb$slot; do
               if [ -e $avbpath/$file ]; then
                 avbblock=$avbpath/$file;
@@ -458,31 +461,40 @@ flash_generic() {
           cd $home;
         fi
       fi
-      $bin/lptools_static remove $1_ak3;
-      if $bin/lptools_static create $1_ak3 $(wc -c < $img); then
-        $bin/lptools_static unmap $1_ak3 || abort "Unmapping $1_ak3 failed. Aborting...";
-        $bin/lptools_static map $1_ak3 || abort "Mapping $1_ak3 failed. Aborting...";
-        $bin/lptools_static replace $1_ak3 $1$slot || abort "Replacing $1$slot failed. Aborting...";
-        imgblock=/dev/block/mapper/$1_ak3;
-      else
-        ui_print "Creating $1_ak3 failed. Attempting to resize $1$slot...";
-        $bin/httools_static umount $1 || abort "Unmounting $1 failed. Aborting...";
-        if [ -e $path/$1-verity ]; then
-          $bin/lptools_static unmap $1-verity || abort "Unmapping $1-verity failed. Aborting...";
+      imgsz=$(wc -c < $img);
+      if [ "$imgsz" != "$(wc -c < $imgblock)" ]; then
+        if [ -d /postinstall/tmp -a "$slot_select" == "inactive" ]; then
+          echo "Resizing $1$slot snapshot..." >&2;
+          $bin/snapshotupdater_static update $1 $imgsz || abort "Resizing $1$slot snapshot failed. Aborting...";
+        else
+          echo "Removing any existing $1_ak3..." >&2;
+          $bin/lptools_static remove $1_ak3;
+          echo "Attempting to create $1_ak3..." >&2;
+          if $bin/lptools_static create $1_ak3 $imgsz; then
+            echo "Replacing $1$slot with $1_ak3..." >&2;
+            $bin/lptools_static unmap $1_ak3 || abort "Unmapping $1_ak3 failed. Aborting...";
+            $bin/lptools_static map $1_ak3 || abort "Mapping $1_ak3 failed. Aborting...";
+            $bin/lptools_static replace $1_ak3 $1$slot || abort "Replacing $1$slot failed. Aborting...";
+            imgblock=/dev/block/mapper/$1_ak3;
+            ui_print " " "Warning: $1$slot replaced in super. Reboot before further logical partition operations.";
+          else
+            echo "Creating $1_ak3 failed. Attempting to resize $1$slot..." >&2;
+            $bin/httools_static umount $1 || abort "Unmounting $1 failed. Aborting...";
+            if [ -e $path/$1-verity ]; then
+              $bin/lptools_static unmap $1-verity || abort "Unmapping $1-verity failed. Aborting...";
+            fi
+            $bin/lptools_static unmap $1$slot || abort "Unmapping $1$slot failed. Aborting...";
+            $bin/lptools_static resize $1$slot $imgsz || abort "Resizing $1$slot failed. Aborting...";
+            $bin/lptools_static map $1$slot || abort "Mapping $1$slot failed. Aborting...";
+            isunmounted=1;
+          fi
         fi
-        $bin/lptools_static unmap $1$slot || abort "Unmapping $1$slot failed. Aborting...";
-        $bin/lptools_static resize $1$slot $(wc -c < $img) || abort "Resizing $1$slot failed. Aborting...";
-        $bin/lptools_static map $1$slot || abort "Mapping $1$slot failed. Aborting...";
-        isunmounted=1;
       fi
     elif [ "$(wc -c < $img)" -gt "$(wc -c < $imgblock)" ]; then
       abort "New $1 image larger than $1 partition. Aborting...";
     fi;
     isro=$(blockdev --getro $imgblock 2>/dev/null);
     blockdev --setrw $imgblock 2>/dev/null;
-    if [ ! "$no_block_display" ]; then
-      ui_print " " "$imgblock";
-    fi;
     if [ -f "$bin/flash_erase" -a -f "$bin/nandwrite" ]; then
       $bin/flash_erase $imgblock 0 0;
       $bin/nandwrite -p $imgblock $img;
@@ -513,6 +525,7 @@ write_boot() {
   repack_ramdisk;
   flash_boot;
   flash_generic vendor_boot; # temporary until hdr v4 can be unpacked/repacked fully by magiskboot
+  flash_generic vendor_kernel_boot; # temporary until hdr v4 can be unpacked/repacked fully by magiskboot
   flash_generic vendor_dlkm;
   flash_generic dtbo;
 }
@@ -682,10 +695,10 @@ patch_cmdline() {
   if ! grep -q "$1" $cmdfile; then
     cmdtmp=$(cat $cmdfile);
     echo "$cmdtmp $2" > $cmdfile;
-    sed -i -e 's;  *; ;g' -e 's;[ \t]*$;;' $cmdfile;
+    sed -i -e 's;^[ \t]*;;' -e 's;  *; ;g' -e 's;[ \t]*$;;' $cmdfile;
   else
     match=$(grep -o "$1.*$" $cmdfile | cut -d\  -f1);
-    sed -i -e "s;${match};${2};" -e 's;  *; ;g' -e 's;[ \t]*$;;' $cmdfile;
+    sed -i -e "s;${match};${2};" -e 's;^[ \t]*;;' -e 's;  *; ;g' -e 's;[ \t]*$;;' $cmdfile;
   fi;
   if [ -f "$home/cmdtmp" ]; then
     sed -i "s|^cmdline=.*|cmdline=$(cat $cmdfile)|" $split_img/header;
@@ -749,7 +762,7 @@ reset_ak() {
 
 # setup_ak
 setup_ak() {
-  local blockfiles parttype name part mtdmount mtdpart mtdname target;
+  local blockfiles plistboot plistinit plistreco parttype name part mtdmount mtdpart mtdname target;
 
   # slot detection enabled by is_slot_device=1 or auto (from anykernel.sh)
   case $is_slot_device in
@@ -761,6 +774,7 @@ setup_ak() {
         [ "$slot" ] || slot=$(grep -o 'androidboot.slot=.*$' /proc/cmdline | cut -d\  -f1 | cut -d= -f2);
         [ "$slot" ] && slot=_$slot;
       fi;
+      [ "$slot" == "normal" ] && unset slot;
       if [ "$slot" ]; then
         if [ -d /postinstall/tmp -a ! "$slot_select" ]; then
           slot_select=inactive;
@@ -785,8 +799,20 @@ setup_ak() {
   rm -f modules/system/lib/modules/placeholder patch/placeholder ramdisk/placeholder;
   rmdir -p modules patch ramdisk 2>/dev/null;
 
-  # automate simple multi-partition setup for boot_img_hdr_v3 + vendor_boot
-  if [ -e "/dev/block/bootdevice/by-name/vendor_boot$slot" -a ! -f vendor_setup ] && [ -f dtb -o -d vendor_ramdisk -o -d vendor_patch ]; then
+  # automate simple multi-partition setup for hdr_v4 boot + init_boot + vendor_kernel_boot (for dtb only until magiskboot supports hdr v4 vendor_ramdisk unpack/repack)
+  if [ -e "/dev/block/bootdevice/by-name/init_boot$slot" -a ! -f init_v4_setup ] && [ -f dtb -o -d vendor_ramdisk -o -d vendor_patch ]; then
+    echo "Setting up for simple automatic init_boot flashing..." >&2;
+    (mkdir boot-files;
+    mv -f Image* boot-files;
+    mkdir init_boot-files;
+    mv -f ramdisk patch init_boot-files;
+    mkdir vendor_kernel_boot-files;
+    mv -f dtb vendor_kernel_boot-files;
+    mv -f vendor_ramdisk vendor_kernel_boot-files/ramdisk;
+    mv -f vendor_patch vendor_kernel_boot-files/patch) 2>/dev/null;
+    touch init_v4_setup;
+  # automate simple multi-partition setup for hdr_v3+ boot + vendor_boot with dtb/dlkm (for v3 only until magiskboot supports hdr v4 vendor_ramdisk unpack/repack)
+  elif [ -e "/dev/block/bootdevice/by-name/vendor_boot$slot" -a ! -f vendor_v3_setup ] && [ -f dtb -o -d vendor_ramdisk -o -d vendor_patch ]; then
     echo "Setting up for simple automatic vendor_boot flashing..." >&2;
     (mkdir boot-files;
     mv -f Image* ramdisk patch boot-files;
@@ -794,7 +820,7 @@ setup_ak() {
     mv -f dtb vendor_boot-files;
     mv -f vendor_ramdisk vendor_boot-files/ramdisk;
     mv -f vendor_patch vendor_boot-files/patch) 2>/dev/null;
-    touch vendor_setup;
+    touch vendor_v3_setup;
   fi;
 
   # allow multi-partition ramdisk modifying configurations (using reset_ak)
@@ -808,16 +834,26 @@ setup_ak() {
     touch $blockfiles/current;
   fi;
 
-  # target block partition detection enabled by block=boot recovery or auto (from anykernel.sh)
+  # target block partition detection enabled by block=<partition filename> or auto (from anykernel.sh)
   case $block in
-     auto|"") block=boot;;
-  esac;
-  case $block in
-    boot|recovery|vendor_boot)
+    /dev/*)
+      if [ "$slot" ] && [ -e "$block$slot" ]; then
+        target=$block$slot;
+      elif [ -e "$block" ]; then
+        target=$block;
+      fi;
+    ;;
+    *)
+      # maintain brief lists of historic matching partition type names for boot, recovery and init_boot/ramdisk
+      plistboot="boot BOOT LNX android_boot bootimg KERN-A kernel KERNEL";
+      plistreco="recovery RECOVERY SOS android_recovery recovery_ramdisk";
+      plistinit="init_boot ramdisk";
       case $block in
-        boot) parttype="ramdisk init_boot boot BOOT LNX android_boot bootimg KERN-A kernel KERNEL";;
-        recovery) parttype="ramdisk_recovery recovery RECOVERY SOS android_recovery";;
-        vendor_boot) parttype="vendor_boot";;
+        auto) parttype="$plistinit $plistboot";;
+        boot|kernel) parttype=$plistboot;;
+        recovery|recovery_ramdisk) parttype=$plistreco;;
+        init_boot|ramdisk) parttype=$plistinit;;
+        *) parttype=$block;;
       esac;
       for name in $parttype; do
         for part in $name$slot $name; do
@@ -829,9 +865,7 @@ setup_ak() {
             else
               abort "Unable to determine mtd $block partition. Aborting...";
             fi;
-            if [ -e /dev/mtd/$mtdname ]; then
-              target=/dev/mtd/$mtdname;
-            fi;
+            [ -e /dev/mtd/$mtdname ] && target=/dev/mtd/$mtdname;
           elif [ -e /dev/block/by-name/$part ]; then
             target=/dev/block/by-name/$part;
           elif [ -e /dev/block/bootdevice/by-name/$part ]; then
@@ -846,18 +880,13 @@ setup_ak() {
           [ "$target" ] && break 2;
         done;
       done;
-      if [ "$target" ]; then
-        block=$(ls $target 2>/dev/null);
-      else
-        abort "Unable to determine $block partition. Aborting...";
-      fi;
-    ;;
-    *)
-      if [ "$slot" ]; then
-        [ -e "$block$slot" ] && block=$block$slot;
-      fi;
     ;;
   esac;
+  if [ "$target" ]; then
+    block=$(ls $target 2>/dev/null);
+  else
+    abort "Unable to determine $block partition. Aborting...";
+  fi;
   if [ ! "$no_block_display" ]; then
     ui_print "$block";
   fi;
