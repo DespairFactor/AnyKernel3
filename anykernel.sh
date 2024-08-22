@@ -2,7 +2,7 @@
 ## osm0sis @ xda-developers
 
 ### AnyKernel setup
-# begin properties
+# global properties
 properties() { '
 kernel.string=Despair Kernel by DespairFactor
 do.devicecheck=0
@@ -17,11 +17,13 @@ device.name4=tuna
 device.name5=
 supported.versions=
 supported.patchlevels=
+supported.vendorpatchlevels=
 '; } # end properties
 
+
 ### AnyKernel install
-# begin attributes
-attributes() {
+## boot files attributes
+boot_attributes() {
 set_perm_recursive 0 0 755 644 $ramdisk/*;
 set_perm_recursive 0 0 750 750 $ramdisk/init* $ramdisk/sbin;
 } # end attributes
@@ -34,17 +36,24 @@ ramdisk_compression=auto;
 patch_vbmeta_flag=auto;
 
 # import functions/variables and setup patching - see for reference (DO NOT REMOVE)
-. tools/ak3-core.sh && attributes;
+. tools/ak3-core.sh;
 
 ## AnyKernel boot install
 flash_generic boot;
 flash_generic vendor_kernel_boot;
 flash_generic vendor_dlkm;
 flash_generic dtbo;
+flash_generic system_dlkm;
 ## end boot install
 
 
-## init_boot shell variables
+## init_boot files attributes
+#init_boot_attributes() {
+#set_perm_recursive 0 0 755 644 $ramdisk/*;
+#set_perm_recursive 0 0 750 750 $ramdisk/init* $ramdisk/sbin;
+#} # end attributes
+
+# init_boot shell variables
 #block=init_boot;
 #is_slot_device=1;
 #ramdisk_compression=auto;
@@ -76,7 +85,13 @@ flash_generic dtbo;
 ## end vendor_kernel_boot install
 
 
-## vendor_boot shell variables
+## vendor_boot files attributes
+#vendor_boot_attributes() {
+#set_perm_recursive 0 0 755 644 $ramdisk/*;
+#set_perm_recursive 0 0 750 750 $ramdisk/init* $ramdisk/sbin;
+#} # end attributes
+
+# vendor_boot shell variables
 #block=vendor_boot;
 #is_slot_device=1;
 #ramdisk_compression=auto;
