@@ -39,7 +39,8 @@ patch_vbmeta_flag=auto;
 . tools/ak3-core.sh;
 
 ## AnyKernel boot install
-flash_generic boot;
+split_boot;
+flash_boot;
 flash_generic vendor_kernel_boot;
 flash_generic vendor_dlkm;
 flash_generic dtbo;
